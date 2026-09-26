@@ -10,31 +10,48 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
-import com.coeric.universalwebcontrol.data.ControlService
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.coeric.universalwebcontrol.data.CloudflareControlService
 import com.coeric.universalwebcontrol.model.ServiceModule
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun UniversalWebControlApp(service: ControlService) {
+fun UniversalWebControlApp(service: CloudflareControlService) {
     var selected by remember { mutableStateOf<ServiceModule?>(null) }
+    var connected by remember { mutableStateOf(service.isConnected()) }
+    var message by remember { mutableStateOf<String?>(null) }
     val modules = service.modules()
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                connected = service.isConnected()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     Scaffold(
         topBar = {
@@ -43,7 +60,7 @@ fun UniversalWebControlApp(service: ControlService) {
                     Column {
                         Text("Universal Web Control")
                         Text(
-                            "Mobile control center",
+                            "Cloudflare control bridge",
                             style = MaterialTheme.typography.labelSmall
                         )
                     }
@@ -55,9 +72,7 @@ fun UniversalWebControlApp(service: ControlService) {
         }
     ) { padding ->
         Surface(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
+            modifier = Modifier.fillMaxSize().padding(padding)
         ) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
@@ -70,35 +85,46 @@ fun UniversalWebControlApp(service: ControlService) {
                     )
                 ) {
                     Column(modifier = Modifier.padding(18.dp)) {
-                        Text(
-                            "Connection",
-                            style = MaterialTheme.typography.titleMedium
-                        )
+                        Text("Cloudflare connection", style = MaterialTheme.typography.titleMedium)
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Text(
-                                "Not connected",
+                                if (connected) "Connected" else "Not connected",
                                 style = MaterialTheme.typography.bodyLarge
                             )
                             AssistChip(
-                                onClick = { },
-                                label = { Text("Connect") }
+                                onClick = {
+                                    if (connected) {
+                                        service.disconnect()
+                                        connected = false
+                                    } else {
+                                        service.beginAuthorization().onFailure {
+                                            message = it.message ?: "Unable to start Cloudflare authorization."
+                                        }
+                                    }
+                                },
+                                label = { Text(if (connected) "Disconnect" else "Connect") }
                             )
                         }
                         Text(
-                            "Connect an account to enable live service controls.",
+                            if (connected) {
+                                service.session()?.name?.let { "Signed in as $it" }
+                                    ?: service.session()?.email?.let { "Signed in as $it" }
+                                    ?: "Cloudflare authorization is active."
+                            } else if (service.isConfigured()) {
+                                "Sign in with Cloudflare to enable live controls."
+                            } else {
+                                "OAuth client setup is required before the Connect button can start authorization."
+                            },
                             modifier = Modifier.padding(top = 8.dp),
                             style = MaterialTheme.typography.bodyMedium
                         )
                     }
                 }
 
-                Text(
-                    "Services",
-                    style = MaterialTheme.typography.titleLarge
-                )
+                Text("Services", style = MaterialTheme.typography.titleLarge)
 
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = 145.dp),
@@ -118,14 +144,24 @@ fun UniversalWebControlApp(service: ControlService) {
     selected?.let { module ->
         ServiceDetail(module = module, onDismiss = { selected = null })
     }
+
+    message?.let { text ->
+        AlertDialog(
+            onDismissRequest = { message = null },
+            title = { Text("Connection") },
+            text = { Text(text) },
+            confirmButton = {
+                TextButton(onClick = { message = null }) {
+                    Text("OK")
+                }
+            }
+        )
+    }
 }
 
 @Composable
 private fun ServiceCard(module: ServiceModule, onClick: () -> Unit) {
-    Card(
-        onClick = onClick,
-        modifier = Modifier.fillMaxWidth()
-    ) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(module.name, style = MaterialTheme.typography.titleMedium)
             Text(
@@ -144,22 +180,20 @@ private fun ServiceCard(module: ServiceModule, onClick: () -> Unit) {
 
 @Composable
 private fun ServiceDetail(module: ServiceModule, onDismiss: () -> Unit) {
-    androidx.compose.material3.AlertDialog(
+    AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(module.name) },
         text = {
             Text(
                 if (module.available) {
-                    "This service is connected and ready for live controls."
+                    "Cloudflare authorization is active for this service catalogue."
                 } else {
-                    "This service is available in Universal Web Control, but no account is connected yet. No remote operation has been attempted."
+                    "Connect your Cloudflare account to enable live controls."
                 }
             )
         },
         confirmButton = {
-            androidx.compose.material3.TextButton(onClick = onDismiss) {
-                Text("Close")
-            }
+            TextButton(onClick = onDismiss) { Text("Close") }
         }
     )
 }
