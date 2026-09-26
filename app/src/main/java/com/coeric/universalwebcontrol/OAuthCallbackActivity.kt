@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.widget.Toast
 import com.coeric.universalwebcontrol.data.CloudflareOAuthManager
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
