@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -35,6 +36,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.coeric.universalwebcontrol.data.CloudflareControlService
 import com.coeric.universalwebcontrol.model.ServiceModule
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UniversalWebControlApp(service: CloudflareControlService) {
     var selected by remember { mutableStateOf<ServiceModule?>(null) }
