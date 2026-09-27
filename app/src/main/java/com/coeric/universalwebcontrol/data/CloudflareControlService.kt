@@ -23,6 +23,7 @@ class CloudflareControlService(context: Context) : ControlService {
     fun isConfigured() = oauth.isConfigured()
     fun isConnected() = oauth.isConnected()
     fun beginAuthorization(): Result<Unit> = oauth.beginAuthorization()
-    fun disconnect() = oauth.disconnect()
+    fun disconnect() = oauth.disconnectLocally()
+    suspend fun revoke() = oauth.revoke()
     fun session() = oauth.session()
 }
