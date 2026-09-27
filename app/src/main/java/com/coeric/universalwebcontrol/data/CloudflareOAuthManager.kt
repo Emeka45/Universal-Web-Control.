@@ -22,14 +22,21 @@ data class CloudflareSession(
 )
 
 class CloudflareOAuthManager(private val context: Context) {
-    private val prefs = context.getSharedPreferences("cloudflare_oauth_flow", Context.MODE_PRIVATE)
     private val secureStore = SecureTokenStore(context)
 
     fun isConfigured(): Boolean =
         CloudflareOAuthConfig.CLIENT_ID.isNotBlank() &&
             CloudflareOAuthConfig.CLIENT_ID != "REPLACE_WITH_CLOUDFLARE_CLIENT_ID"
 
-    fun isConnected(): Boolean = secureStore.get("access_token") != null
+    fun isConnected(): Boolean {
+        val token = secureStore.get("access_token") ?: return false
+        val expiresAt = secureStore.get("expires_at")?.toLongOrNull()
+        if (expiresAt != null && expiresAt <= System.currentTimeMillis()) {
+            clearSession()
+            return false
+        }
+        return token.isNotBlank()
+    }
 
     fun session(): CloudflareSession? {
         if (!isConnected()) return null
@@ -44,21 +51,19 @@ class CloudflareOAuthManager(private val context: Context) {
     fun beginAuthorization(): Result<Unit> {
         if (!isConfigured()) {
             return Result.failure(
-                IllegalStateException("Cloudflare OAuth is not configured. Add the Cloudflare OAuth client ID.")
+                IllegalStateException("Cloudflare OAuth is not configured. Add the Cloudflare client ID.")
             )
         }
 
+        // PKCE values are temporary and encrypted with Android Keystore.
         val verifier = randomUrlSafe(64)
         val challenge = base64Url(
             MessageDigest.getInstance("SHA-256")
                 .digest(verifier.toByteArray(StandardCharsets.US_ASCII))
         )
         val state = randomUrlSafe(32)
-
-        prefs.edit()
-            .putString("pkce_verifier", verifier)
-            .putString("oauth_state", state)
-            .apply()
+        secureStore.put("pkce_verifier", verifier)
+        secureStore.put("oauth_state", state)
 
         val uri = Uri.parse(CloudflareOAuthConfig.AUTHORIZATION_ENDPOINT)
             .buildUpon()
@@ -77,8 +82,8 @@ class CloudflareOAuthManager(private val context: Context) {
 
     suspend fun completeAuthorization(callback: Uri): Result<CloudflareSession> =
         withContext(Dispatchers.IO) {
-            val expectedState = prefs.getString("oauth_state", null)
-            val verifier = prefs.getString("pkce_verifier", null)
+            val expectedState = secureStore.get("oauth_state")
+            val verifier = secureStore.get("pkce_verifier")
             val code = callback.getQueryParameter("code")
             val returnedState = callback.getQueryParameter("state")
             val error = callback.getQueryParameter("error")
@@ -87,9 +92,11 @@ class CloudflareOAuthManager(private val context: Context) {
                 IllegalStateException("Cloudflare authorization failed: $error")
             )
             if (code.isNullOrBlank() || expectedState.isNullOrBlank() || verifier.isNullOrBlank()) {
+                clearOAuthFlow()
                 return@withContext Result.failure(IllegalStateException("Incomplete OAuth callback."))
             }
             if (returnedState != expectedState) {
+                clearOAuthFlow()
                 return@withContext Result.failure(SecurityException("OAuth state validation failed."))
             }
 
@@ -105,6 +112,7 @@ class CloudflareOAuthManager(private val context: Context) {
                     )
                 )
                 if (response.code !in 200..299) {
+                    clearOAuthFlow()
                     return@withContext Result.failure(
                         IllegalStateException("Cloudflare token exchange failed (${response.code}).")
                     )
@@ -116,6 +124,7 @@ class CloudflareOAuthManager(private val context: Context) {
                         IllegalStateException("Cloudflare did not return an access token.")
                     )
 
+                // Store only the encrypted session material; never log or expose tokens.
                 secureStore.put("access_token", accessToken)
                 json.optString("refresh_token").takeIf { it.isNotBlank() }?.let {
                     secureStore.put("refresh_token", it)
@@ -126,7 +135,8 @@ class CloudflareOAuthManager(private val context: Context) {
 
                 val userResponse = getAuthorized(CloudflareOAuthConfig.USERINFO_ENDPOINT, accessToken)
                 if (userResponse.code !in 200..299) {
-                    secureStore.clear()
+                    clearSession()
+                    clearOAuthFlow()
                     return@withContext Result.failure(
                         IllegalStateException("Cloudflare userinfo request failed (${userResponse.code}).")
                     )
@@ -137,14 +147,46 @@ class CloudflareOAuthManager(private val context: Context) {
                 user.optString("email").takeIf { it.isNotBlank() }?.let { secureStore.put("email", it) }
                 user.optString("name").takeIf { it.isNotBlank() }?.let { secureStore.put("name", it) }
 
-                prefs.edit().remove("oauth_state").remove("pkce_verifier").apply()
+                clearOAuthFlow()
                 Result.success(session() ?: error("Session was not created"))
             } catch (e: Exception) {
+                clearOAuthFlow()
                 Result.failure(e)
             }
         }
 
-    fun disconnect() {
+    suspend fun revoke(): Result<Unit> = withContext(Dispatchers.IO) {
+        val token = secureStore.get("access_token")
+        if (token.isNullOrBlank()) {
+            clearSession()
+            return@withContext Result.success(Unit)
+        }
+        try {
+            val response = postForm(
+                CloudflareOAuthConfig.REVOKE_ENDPOINT,
+                mapOf("token" to token, "token_type_hint" to "access_token")
+            )
+            clearSession()
+            if (response.code in 200..299 || response.code == 400) {
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException("Cloudflare revocation failed (${response.code})."))
+            }
+        } catch (e: Exception) {
+            // Always erase local credentials even if the network is unavailable.
+            clearSession()
+            Result.failure(e)
+        }
+    }
+
+    fun disconnectLocally() = clearSession()
+
+    private fun clearOAuthFlow() {
+        secureStore.remove("oauth_state")
+        secureStore.remove("pkce_verifier")
+    }
+
+    private fun clearSession() {
         secureStore.clear()
     }
 
