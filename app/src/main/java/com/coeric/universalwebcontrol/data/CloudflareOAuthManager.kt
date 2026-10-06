@@ -216,6 +216,6 @@ class CloudflareOAuthManager(private val context: Context) {
 
     private object ApiConstants {
         const val API_BASE_URL = "https://api.cloudflare.com/client/v4/"
-        const val ApiConstants.STORE_KEY = "cloudflare_api_token"
+        const val STORE_KEY = "cf_session"
     }
 }
