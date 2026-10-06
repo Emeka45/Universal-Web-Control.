@@ -1,18 +1,12 @@
 package com.coeric.universalwebcontrol.data
 
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
-import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
-import java.security.SecureRandom
-import java.util.Base64
 
 data class CloudflareSession(
     val subject: String?,
@@ -21,218 +15,202 @@ data class CloudflareSession(
     val expiresAtMillis: Long?
 )
 
+data class CloudflareZone(
+    val id: String,
+    val name: String,
+    val status: String?,
+    val planName: String?
+)
+
 class CloudflareOAuthManager(private val context: Context) {
     private val secureStore = SecureTokenStore(context)
+    private val apiBase = CloudflareOAuthConfig.API_BASE_URL
 
-    fun isConfigured(): Boolean =
-        CloudflareOAuthConfig.CLIENT_ID.isNotBlank() &&
-            CloudflareOAuthConfig.CLIENT_ID != "REPLACE_WITH_CLOUDFLARE_CLIENT_ID"
+    fun isConfigured(): Boolean = true
 
-    fun isConnected(): Boolean {
-        val token = secureStore.get("access_token") ?: return false
-        val expiresAt = secureStore.get("expires_at")?.toLongOrNull()
-        if (expiresAt != null && expiresAt <= System.currentTimeMillis()) {
-            clearSession()
-            return false
-        }
-        return token.isNotBlank()
-    }
+    fun isConnected(): Boolean =
+        secureStore.get(CloudflareOAuthConfig.TOKEN_STORE_KEY)?.isNotBlank() == true
 
     fun session(): CloudflareSession? {
         if (!isConnected()) return null
         return CloudflareSession(
-            subject = secureStore.get("subject"),
-            email = secureStore.get("email"),
-            name = secureStore.get("name"),
-            expiresAtMillis = secureStore.get("expires_at")?.toLongOrNull()
+            subject = secureStore.get("cloudflare_token_id"),
+            email = null,
+            name = "Cloudflare API token",
+            expiresAtMillis = null
         )
     }
 
-    fun beginAuthorization(): Result<Unit> {
-        if (!isConfigured()) {
-            return Result.failure(
-                IllegalStateException("Cloudflare OAuth is not configured. Add the Cloudflare client ID.")
-            )
-        }
-
-        // PKCE values are temporary and encrypted with Android Keystore.
-        val verifier = randomUrlSafe(64)
-        val challenge = base64Url(
-            MessageDigest.getInstance("SHA-256")
-                .digest(verifier.toByteArray(StandardCharsets.US_ASCII))
-        )
-        val state = randomUrlSafe(32)
-        secureStore.put("pkce_verifier", verifier)
-        secureStore.put("oauth_state", state)
-
-        val uri = Uri.parse(CloudflareOAuthConfig.AUTHORIZATION_ENDPOINT)
-            .buildUpon()
-            .appendQueryParameter("client_id", CloudflareOAuthConfig.CLIENT_ID)
-            .appendQueryParameter("redirect_uri", CloudflareOAuthConfig.REDIRECT_URI)
-            .appendQueryParameter("response_type", "code")
-            .appendQueryParameter("scope", CloudflareOAuthConfig.SCOPE)
-            .appendQueryParameter("state", state)
-            .appendQueryParameter("code_challenge", challenge)
-            .appendQueryParameter("code_challenge_method", "S256")
-            .build()
-
-        context.startActivity(Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        return Result.success(Unit)
-    }
-
-    suspend fun completeAuthorization(callback: Uri): Result<CloudflareSession> =
+    suspend fun connectWithApiToken(token: String): Result<CloudflareSession> =
         withContext(Dispatchers.IO) {
-            val expectedState = secureStore.get("oauth_state")
-            val verifier = secureStore.get("pkce_verifier")
-            val code = callback.getQueryParameter("code")
-            val returnedState = callback.getQueryParameter("state")
-            val error = callback.getQueryParameter("error")
-
-            if (error != null) return@withContext Result.failure(
-                IllegalStateException("Cloudflare authorization failed: $error")
-            )
-            if (code.isNullOrBlank() || expectedState.isNullOrBlank() || verifier.isNullOrBlank()) {
-                clearOAuthFlow()
-                return@withContext Result.failure(IllegalStateException("Incomplete OAuth callback."))
-            }
-            if (returnedState != expectedState) {
-                clearOAuthFlow()
-                return@withContext Result.failure(SecurityException("OAuth state validation failed."))
+            val normalized = token.trim()
+            if (normalized.isBlank()) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("Enter a Cloudflare API token.")
+                )
             }
 
             try {
-                val response = postForm(
-                    CloudflareOAuthConfig.TOKEN_ENDPOINT,
-                    mapOf(
-                        "grant_type" to "authorization_code",
-                        "client_id" to CloudflareOAuthConfig.CLIENT_ID,
-                        "redirect_uri" to CloudflareOAuthConfig.REDIRECT_URI,
-                        "code" to code,
-                        "code_verifier" to verifier
-                    )
-                )
+                val response = getAuthorized("/user/tokens/verify", normalized)
                 if (response.code !in 200..299) {
-                    clearOAuthFlow()
                     return@withContext Result.failure(
-                        IllegalStateException("Cloudflare token exchange failed (${response.code}).")
+                        IllegalStateException(
+                            "Cloudflare rejected the API token ($response.code). $apiError(response.body)"
+                        )
                     )
                 }
 
                 val json = JSONObject(response.body)
-                val accessToken = json.optString("access_token").takeIf { it.isNotBlank() }
-                    ?: return@withContext Result.failure(
-                        IllegalStateException("Cloudflare did not return an access token.")
-                    )
-
-                // Store only the encrypted session material; never log or expose tokens.
-                secureStore.put("access_token", accessToken)
-                json.optString("refresh_token").takeIf { it.isNotBlank() }?.let {
-                    secureStore.put("refresh_token", it)
-                }
-                json.optLong("expires_in", 0).takeIf { it > 0 }?.let {
-                    secureStore.put("expires_at", (System.currentTimeMillis() + it * 1000L).toString())
-                }
-
-                val userResponse = getAuthorized(CloudflareOAuthConfig.USERINFO_ENDPOINT, accessToken)
-                if (userResponse.code !in 200..299) {
-                    clearSession()
-                    clearOAuthFlow()
+                if (!json.optBoolean("success", false)) {
                     return@withContext Result.failure(
-                        IllegalStateException("Cloudflare userinfo request failed (${userResponse.code}).")
+                        IllegalStateException("Cloudflare rejected the API token. $apiError(response.body)")
                     )
                 }
 
-                val user = JSONObject(userResponse.body)
-                user.optString("sub").takeIf { it.isNotBlank() }?.let { secureStore.put("subject", it) }
-                user.optString("email").takeIf { it.isNotBlank() }?.let { secureStore.put("email", it) }
-                user.optString("name").takeIf { it.isNotBlank() }?.let { secureStore.put("name", it) }
+                val tokenId = json.optJSONObject("result")?.optString("id").orEmpty()
+                val status = json.optJSONObject("result")?.optString("status").orEmpty()
+                if (status.isNotBlank() && !status.equals("active", ignoreCase = true)) {
+                    return@withContext Result.failure(
+                        IllegalStateException("Cloudflare API token status is $status.")
+                    )
+                }
 
-                clearOAuthFlow()
-                Result.success(session() ?: error("Session was not created"))
+                secureStore.put(CloudflareOAuthConfig.TOKEN_STORE_KEY, normalized)
+                if (tokenId.isNotBlank()) {
+                    secureStore.put("cloudflare_token_id", tokenId)
+                }
+
+                Result.success(session() ?: error("Cloudflare session was not created"))
             } catch (e: Exception) {
-                clearOAuthFlow()
-                Result.failure(e)
+                Result.failure(
+                    IllegalStateException(
+                        "Could not reach Cloudflare. Check your internet connection and try again.",
+                        e
+                    )
+                )
             }
         }
 
-    suspend fun revoke(): Result<Unit> = withContext(Dispatchers.IO) {
-        val token = secureStore.get("access_token")
-        if (token.isNullOrBlank()) {
-            clearSession()
-            return@withContext Result.success(Unit)
-        }
-        try {
-            val response = postForm(
-                CloudflareOAuthConfig.REVOKE_ENDPOINT,
-                mapOf("token" to token, "token_type_hint" to "access_token")
-            )
-            clearSession()
-            if (response.code in 200..299 || response.code == 400) {
-                Result.success(Unit)
-            } else {
-                Result.failure(IllegalStateException("Cloudflare revocation failed (${response.code})."))
+    suspend fun verifyStoredToken(): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            val token = secureStore.get(CloudflareOAuthConfig.TOKEN_STORE_KEY)
+                ?: return@withContext Result.failure(
+                    IllegalStateException("No Cloudflare API token is stored.")
+                )
+            try {
+                val response = getAuthorized("/user/tokens/verify", token)
+                if (response.code in 200..299 &&
+                    JSONObject(response.body).optBoolean("success", false)
+                ) {
+                    Result.success(Unit)
+                } else {
+                    disconnectLocally()
+                    Result.failure(
+                        IllegalStateException(
+                            "Stored Cloudflare API token is no longer valid. $apiError(response.body)"
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                Result.failure(
+                    IllegalStateException("Unable to verify the stored Cloudflare token.", e)
+                )
             }
-        } catch (e: Exception) {
-            // Always erase local credentials even if the network is unavailable.
-            clearSession()
-            Result.failure(e)
         }
-    }
 
-    fun disconnectLocally() = clearSession()
-
-    private fun clearOAuthFlow() {
-        secureStore.remove("oauth_state")
-        secureStore.remove("pkce_verifier")
-    }
-
-    private fun clearSession() {
-        secureStore.clear()
-    }
-
-    private fun postForm(urlString: String, fields: Map<String, String>): HttpResponse {
-        val body = fields.entries.joinToString("&") {
-            URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
+    suspend fun listZones(): Result<List<CloudflareZone>> =
+        withContext(Dispatchers.IO) {
+            val token = secureStore.get(CloudflareOAuthConfig.TOKEN_STORE_KEY)
+                ?: return@withContext Result.failure(
+                    IllegalStateException("Connect Cloudflare first.")
+                )
+            try {
+                val response = getAuthorized("/zones?per_page=100", token)
+                if (response.code !in 200..299) {
+                    return@withContext Result.failure(
+                        IllegalStateException("Cloudflare zones request failed ($response.code). $apiError(response.body)")
+                    )
+                }
+                val json = JSONObject(response.body)
+                if (!json.optBoolean("success", false)) {
+                    return@withContext Result.failure(
+                        IllegalStateException("Cloudflare zones request failed. $apiError(response.body)")
+                    )
+                }
+                val items = json.optJSONArray("result") ?: JSONArray()
+                val zones = buildList {
+                    for (index in 0 until items.length()) {
+                        val item = items.optJSONObject(index) ?: continue
+                        add(
+                            CloudflareZone(
+                                id = item.optString("id"),
+                                name = item.optString("name"),
+                                status = item.optString("status").takeIf { it.isNotBlank() },
+                                planName = item.optJSONObject("plan")?.optString("name")
+                                    ?.takeIf { it.isNotBlank() }
+                            )
+                        )
+                    }
+                }
+                Result.success(zones)
+            } catch (e: Exception) {
+                Result.failure(
+                    IllegalStateException("Unable to read Cloudflare zones.", e)
+                )
+            }
         }
-        val connection = (URL(urlString).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            doOutput = true
-            connectTimeout = 15_000
-            readTimeout = 15_000
-            setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-            setRequestProperty("Accept", "application/json")
-        }
-        connection.outputStream.use { it.write(body.toByteArray(StandardCharsets.UTF_8)) }
-        return readResponse(connection)
+
+    fun disconnectLocally() {
+        secureStore.remove(CloudflareOAuthConfig.TOKEN_STORE_KEY)
+        secureStore.remove("cloudflare_token_id")
     }
 
-    private fun getAuthorized(urlString: String, token: String): HttpResponse {
-        val connection = (URL(urlString).openConnection() as HttpURLConnection).apply {
+    suspend fun revoke(): Result<Unit> {
+        disconnectLocally()
+        return Result.success(Unit)
+    }
+
+    private fun getAuthorized(path: String, token: String): HttpResponse {
+        val connection = (URL(apiBase.trimEnd('/') + path).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 15_000
             readTimeout = 15_000
-            setRequestProperty("Authorization", "Bearer $token")
+            useCaches = false
+            setRequestProperty("Authorization", authorizationHeader(token))
             setRequestProperty("Accept", "application/json")
         }
         return readResponse(connection)
     }
 
     private fun readResponse(connection: HttpURLConnection): HttpResponse {
-        val code = connection.responseCode
-        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-        connection.disconnect()
-        return HttpResponse(code, body)
+        return try {
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            HttpResponse(code, body)
+        } finally {
+            connection.disconnect()
+        }
     }
 
-    private fun randomUrlSafe(length: Int): String {
-        val bytes = ByteArray(length)
-        SecureRandom().nextBytes(bytes)
-        return base64Url(bytes)
+    private fun apiError(body: String): String {
+        return runCatching {
+            val errors = JSONObject(body).optJSONArray("errors") ?: return@runCatching ""
+            buildList {
+                for (index in 0 until errors.length()) {
+                    errors.optJSONObject(index)?.optString("message")
+                        ?.takeIf { it.isNotBlank() }?.let(::add)
+                }
+            }.joinToString("; ")
+        }.getOrDefault("")
     }
 
-    private fun base64Url(bytes: ByteArray): String =
-        Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+    companion object {
+        fun authorizationHeader(token: String): String {
+            require(token.isNotBlank()) { "Cloudflare API token must not be blank." }
+            return "Bearer ${token.trim()}"
+        }
+    }
 
     private data class HttpResponse(val code: Int, val body: String)
 }
