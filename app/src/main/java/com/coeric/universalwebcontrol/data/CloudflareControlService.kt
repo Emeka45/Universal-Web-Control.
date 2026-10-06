@@ -4,14 +4,14 @@ import android.content.Context
 import com.coeric.universalwebcontrol.model.ServiceModule
 
 class CloudflareControlService(context: Context) : ControlService {
-    private val oauth = CloudflareOAuthManager(context.applicationContext)
+    private val api = CloudflareOAuthManager(context.applicationContext)
 
     override fun modules(): List<ServiceModule> {
-        val connected = oauth.isConnected()
+        val connected = api.isConnected()
         return listOf(
             ServiceModule("workers", "Workers", "Deploy and manage edge applications.", connected),
             ServiceModule("pages", "Pages", "Manage web projects and deployments.", connected),
-            ServiceModule("dns", "DNS", "Manage DNS records and zones.", connected),
+            ServiceModule("dns", "DNS", "Read and manage DNS records.", connected),
             ServiceModule("domains", "Domains", "View and manage supported domains.", connected),
             ServiceModule("analytics", "Analytics", "Inspect traffic and service metrics.", connected),
             ServiceModule("ai", "AI", "Access supported AI and model services.", connected),
@@ -20,10 +20,12 @@ class CloudflareControlService(context: Context) : ControlService {
         )
     }
 
-    fun isConfigured() = oauth.isConfigured()
-    fun isConnected() = oauth.isConnected()
-    fun beginAuthorization(): Result<Unit> = oauth.beginAuthorization()
-    fun disconnect() = oauth.disconnectLocally()
-    suspend fun revoke() = oauth.revoke()
-    fun session() = oauth.session()
+    fun isConfigured() = api.isConfigured()
+    fun isConnected() = api.isConnected()
+    suspend fun connectWithApiToken(token: String) = api.connectWithApiToken(token)
+    suspend fun verifyStoredToken() = api.verifyStoredToken()
+    suspend fun listZones() = api.listZones()
+    fun disconnect() = api.disconnectLocally()
+    suspend fun revoke() = api.revoke()
+    fun session() = api.session()
 }
