@@ -24,12 +24,12 @@ data class CloudflareZone(
 
 class CloudflareOAuthManager(private val context: Context) {
     private val secureStore = SecureTokenStore(context)
-    private val apiBase = CloudflareOAuthConfig.API_BASE_URL
+    private val apiBase = API_BASE_URL
 
     fun isConfigured(): Boolean = true
 
     fun isConnected(): Boolean =
-        secureStore.get(CloudflareOAuthConfig.TOKEN_STORE_KEY)?.isNotBlank() == true
+        secureStore.get(TOKEN_STORE_KEY)?.isNotBlank() == true
 
     fun session(): CloudflareSession? {
         if (!isConnected()) return null
@@ -75,7 +75,7 @@ class CloudflareOAuthManager(private val context: Context) {
                     )
                 }
 
-                secureStore.put(CloudflareOAuthConfig.TOKEN_STORE_KEY, normalized)
+                secureStore.put(TOKEN_STORE_KEY, normalized)
                 if (tokenId.isNotBlank()) {
                     secureStore.put("cloudflare_token_id", tokenId)
                 }
@@ -93,7 +93,7 @@ class CloudflareOAuthManager(private val context: Context) {
 
     suspend fun verifyStoredToken(): Result<Unit> =
         withContext(Dispatchers.IO) {
-            val token = secureStore.get(CloudflareOAuthConfig.TOKEN_STORE_KEY)
+            val token = secureStore.get(TOKEN_STORE_KEY)
                 ?: return@withContext Result.failure(
                     IllegalStateException("No Cloudflare API token is stored.")
                 )
@@ -120,7 +120,7 @@ class CloudflareOAuthManager(private val context: Context) {
 
     suspend fun listZones(): Result<List<CloudflareZone>> =
         withContext(Dispatchers.IO) {
-            val token = secureStore.get(CloudflareOAuthConfig.TOKEN_STORE_KEY)
+            val token = secureStore.get(TOKEN_STORE_KEY)
                 ?: return@withContext Result.failure(
                     IllegalStateException("Connect Cloudflare first.")
                 )
@@ -161,7 +161,7 @@ class CloudflareOAuthManager(private val context: Context) {
         }
 
     fun disconnectLocally() {
-        secureStore.remove(CloudflareOAuthConfig.TOKEN_STORE_KEY)
+        secureStore.remove(TOKEN_STORE_KEY)
         secureStore.remove("cloudflare_token_id")
     }
 
@@ -213,4 +213,9 @@ class CloudflareOAuthManager(private val context: Context) {
     }
 
     private data class HttpResponse(val code: Int, val body: String)
+
+    private companion object {
+        const val API_BASE_URL = "https://api.cloudflare.com/client/v4/"
+        const val TOKEN_STORE_KEY = "cloudflare_api_token"
+    }
 }
