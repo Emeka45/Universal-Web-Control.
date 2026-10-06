@@ -30,3 +30,6 @@ The debug APK is generated at `app/build/outputs/apk/debug/app-debug.apk`.
 ## Security
 
 Never commit API tokens, OAuth client secrets, private keys, or account credentials. Production authentication will be introduced behind the service boundary.
+
+
+API route integration work is tracked in the main branch.
