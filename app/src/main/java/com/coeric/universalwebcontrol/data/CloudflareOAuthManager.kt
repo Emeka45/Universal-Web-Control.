@@ -33,7 +33,9 @@ class CloudflareOAuthManager(private val context: Context) {
     private val secureStore = SecureTokenStore(context)
     private val apiBase = ApiConstants.API_BASE_URL
 
-    fun isConfigured(): Boolean = true
+    fun isConfigured(): Boolean =
+        CloudflareOAuthConfig.CLIENT_ID.isNotBlank() &&
+            !CloudflareOAuthConfig.CLIENT_ID.startsWith("REPLACE_")
 
     fun isConnected(): Boolean =
         secureStore.get(ApiConstants.STORE_KEY)?.isNotBlank() == true
