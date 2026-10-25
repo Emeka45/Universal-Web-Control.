@@ -21,6 +21,8 @@ class CloudflareControlService(context: Context) : ControlService {
     }
 
     fun isConfigured() = api.isConfigured()
+    fun beginAuthorization() = api.beginAuthorization()
+    suspend fun completeAuthorization(callback: android.net.Uri) = api.completeAuthorization(callback)
     fun isConnected() = api.isConnected()
     suspend fun connectWithApiToken(token: String) = api.connectWithApiToken(token)
     suspend fun verifyStoredToken() = api.verifyStoredToken()
