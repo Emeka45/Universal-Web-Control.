@@ -249,7 +249,7 @@ class CloudflareOAuthManager(private val context: Context) {
                     throw IllegalStateException(message)
                 }
                 secureStore.put(ApiConstants.STORE_KEY, accessToken)
-                json.optString("refresh_token").takeIf { it.isNotBlank() }?.let {
+                json?.optString("refresh_token")?.takeIf { it.isNotBlank() }?.let {
                     secureStore.put("cloudflare_refresh_token", it)
                 }
                 secureStore.remove("oauth_state")
